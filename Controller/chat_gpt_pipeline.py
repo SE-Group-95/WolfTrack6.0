@@ -39,6 +39,7 @@ def pdf_to_text(pdf_path, text_path):
 def chatgpt(resume_textfile_path):
     with open(resume_textfile_path, 'r') as file:
         content = file.read()
+
     openai_api_key = os.environ.get('OPENAI_API_KEY')
 
     # Set the API endpoint

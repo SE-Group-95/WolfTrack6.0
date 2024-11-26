@@ -239,12 +239,16 @@
       <ul class="navbar-nav ml-auto">
         <a href="/resume_builder" style="color: #facaca; text-decoration: none">Resume Builder</a>
     </ul>
+      <ul class="navbar-nav ml-auto">
+        <a href="/interview-prep" style="color: #facaca; text-decoration: none">Interview Preparation</a>
+      </ul>
 
       <ul class="navbar-nav ml-auto">
         <li class="nav-item">
           <a class="nav-link" href="/logout">Logout</a>
         </li>
       </ul>
+
     </nav>
 
     <div class="container-fluid">
@@ -464,6 +468,29 @@
               </form>
             </div>
           </div>
+        {% if error %}
+<div class="alert alert-danger" role="alert" style="margin-bottom: 15px;">
+    {{ error }}
+</div>
+{% endif %}
+{% if success %}
+<div class="alert alert-success" role="alert" style="margin-bottom: 15px;">
+    {{ success }}
+</div>
+{% endif %}
+
+<div class="section-division"></div>
+<div class="section-content">
+
+
+            {% if data %}
+  <div class="alert alert-success" role="alert">
+    {{ data }}
+  </div>
+{% endif %}
+
+
+
           <div class="section-heading" style="padding-top: 20px">
             Send Profile
             <!--Padding is optional-->
