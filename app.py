@@ -9,7 +9,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 '''
-
+import base64
 import os
 import logging
 from flask import Flask, jsonify, request, render_template, make_response, redirect, url_for, send_from_directory, session, flash, send_file
@@ -23,7 +23,6 @@ from Controller.send_email import *
 from Controller.send_profile import *
 from Controller.ResumeParser import *
 from Utils.jobprofileutils import *
-import os
 from flask import send_file, current_app as app
 from Controller.chat_gpt_pipeline import pdf_to_text,chatgpt,extract_top_job_roles
 from Controller.data import data, upcoming_events, profile
@@ -40,6 +39,13 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 logging.basicConfig(level=logging.ERROR)
 from dotenv import load_dotenv
+import requests
+from flask import Flask, request, jsonify, render_template
+from werkzeug.exceptions import BadRequest, InternalServerError
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+API_URL = "https://api.openai.com/v1/chat/completions"
+
 
 
 
@@ -51,7 +57,10 @@ bcrypt = Bcrypt(app)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', "sqlite:///database.db")
 # Set the SECRET_KEY, with a fallback for testing environments
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default_testing_secret_key')
-
+RAPIDAPI_HOST = "jsearch.p.rapidapi.com"
+RAPIDAPI_KEY = "7f4943ad9fmshddfeb1877d48292p13945cjsnc572b8529ab0"
+UPLOAD_FOLDER = 'uploads/'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # Raise an error if the SECRET_KEY is missing in non-test environments
 if not app.config['SECRET_KEY'] and os.getenv('FLASK_ENV') != 'testing':
     raise ValueError("No SECRET_KEY set for Flask application")
@@ -80,9 +89,12 @@ class Resume(db.Model):
 
 # Original Form Classes
 class RegisterForm(FlaskForm):
-    username = StringField(render_kw={"placeholder": "Username"})
-    name = StringField(render_kw={"placeholder": "Name"})
-    password = PasswordField(render_kw={"placeholder": "Password"})
+    username = StringField(validators=[
+        InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Username"})
+    name = StringField(validators=[
+        InputRequired(), Length(min=4, max=20)], render_kw={"placeholder": "Name"})
+    password = PasswordField(validators=[
+        InputRequired(), Length(min=8, max=20)], render_kw={"placeholder": "Password"})
     usertype = SelectField(render_kw={"placeholder": "Usertype"}, choices=[('admin', 'Admin'), ('student', 'Student')])
     submit = SubmitField('Register')
 
@@ -262,7 +274,20 @@ def create_pdf(resume_data):
     doc.build(story)
     buffer.seek(0)
     return buffer
+import re
+from html import escape
 
+
+# Function to format job description
+def format_job_description(text):
+    text = escape(text)
+    text = re.sub(r'(\r?\n){2,}', '</p><p>', text)
+    if text.strip():
+        text = f"<p>{text}</p>"
+    text = re.sub(r'(https?://[^\s]+)', r'<a href="\1" target="_blank">\1</a>', text)
+    text = re.sub(r'\n+', '\n', text)
+
+    return text
 # Original Routes
 @app.route('/')
 def index():
@@ -381,26 +406,57 @@ def admin():
     return render_template('admin_landing.html', user=user)
 
 
-@app.route('/student',methods=['GET', 'POST'])
+@app.route('/student', methods=['GET', 'POST'])
 def student():
     data_received = request.args.get('data')
-    user = find_user(str(data_received),database)
+    page = request.args.get('page', default=1, type=int)
+    per_page = 5
+
+    user = find_user(str(data_received), database)
+    total_jobs = len(get_job_applications(database))
+    total_pages = (total_jobs + per_page - 1) // per_page
+    start = (page - 1) * per_page
+    end = start + per_page
+    jobapplications = get_job_applications(database)[start:end]
+
+    # Ensure all variables are returned
+    return render_template(
+        'home.html',
+        user=user,
+        jobapplications=jobapplications,
+        current_page=page,
+        total_pages=total_pages,
+        data=None,
+        upcoming_events=[]
+    )
 
 
-    jobapplications = get_job_applications(database)
-    return render_template('home.html', user=user, jobapplications=jobapplications)
 
 @app.route('/student/<status>', methods=['GET', 'POST'])
 def get_job_application_status(status):
     data_received = request.args.get('data')
+    page = request.args.get('page', default=1, type=int)
+    per_page = 5
+
     user = find_user(str(data_received), database)
+    job_applications = get_job_applications_by_status(database, status) if status else get_job_applications(database)
+    total_jobs = len(job_applications)
+    total_pages = (total_jobs + per_page - 1) // per_page
+    start = (page - 1) * per_page
+    end = start + per_page
+    job_applications = job_applications[start:end]
 
-    if status:
-        job_applications = get_job_applications_by_status(database, status)
-    else:
-        job_applications = get_job_applications(database)
+    # Ensure all variables are returned
+    return render_template(
+        'home.html',
+        user=user,
+        jobapplications=job_applications,
+        current_page=page,
+        total_pages=total_pages,
+        data=None,
+        upcoming_events=[]
+    )
 
-    return render_template('home.html', user=user, jobapplications=job_applications)
 
 
 @app.route("/admin/send_email", methods=['GET','POST'])
@@ -462,7 +518,7 @@ def delete_job_application(company):
         # Redirect to a success page or any relevant route after successful deletion
         return redirect(url_for('student', data=user_id))  # Redirect to the student page or your desired route
 
-@app.route('/student/add_New',methods=['GET','POST'])
+@app.route('/student/add_New', methods=['GET', 'POST'])
 def add_New():
     company_name = request.form['fullname']
     location = request.form['location_text']
@@ -476,29 +532,37 @@ def add_New():
     notes = request.form['notes']
     date_applied = request.form['starting_date']
 
-    s_email(company_name,location, Job_Profile,salary, user,password,email,sec_question,sec_answer,notes,date_applied)
-    return render_template('home.html', data=data, upcoming_events=upcoming_events, user=user)
+    s_email(company_name, location, Job_Profile, salary, user, password, email, sec_question, sec_answer, notes, date_applied)
+    return render_template('home.html', data=None, upcoming_events=[], user=user, jobapplications=[], current_page=1, total_pages=1)
 
-@app.route('/student/send_Profile',methods=['GET','POST'])
+# @app.route('/student/send_Profile',methods=['GET','POST'])
+# def send_Profile():
+#     emailID = request.form['emailID']
+#     s_profile(data,upcoming_events, profile,emailID)
+#
+#     print("Email Notification Sent")
+#     '''data_received = request.args.get('data')
+#     print('data_receivedddd->>>> ', data_received)
+#     user = find_user(str(data_received))
+#     print('Userrrrrr', user)'''
+#     user_id = request.form['user_id']
+#     user = request.form['user_id']
+#     print('==================================================================', user)
+#
+#     user = find_user(str(user),database)
+#
+#     data_received = request.args.get('data')
+#     user = find_user(str(data_received),database)
+#
+#     return render_template('home.html', data=data, upcoming_events=upcoming_events, user=user)
+@app.route('/student/send_Profile', methods=['GET', 'POST'])
 def send_Profile():
     emailID = request.form['emailID']
-    s_profile(data,upcoming_events, profile,emailID)
-
-    print("Email Notification Sent")
-    '''data_received = request.args.get('data')
-    print('data_receivedddd->>>> ', data_received)
-    user = find_user(str(data_received))
-    print('Userrrrrr', user)'''
+    s_profile(data=None, upcoming_events=[], profile=None, emailID=emailID)
     user_id = request.form['user_id']
-    user = request.form['user_id']
-    print('==================================================================', user)
-    
-    user = find_user(str(user),database)
+    user = find_user(str(user_id), database)
 
-    data_received = request.args.get('data')
-    user = find_user(str(data_received),database)
-
-    return render_template('home.html', data=data, upcoming_events=upcoming_events, user=user)
+    return render_template('home.html', data=None, upcoming_events=[], user=user, jobapplications=[], current_page=1, total_pages=1)
 
 
 @app.route('/student/job_profile_analyze', methods=['GET', 'POST'])
@@ -529,7 +593,8 @@ def upload():
 
     user_id = request.form['user_id']
     user = find_user(str(user_id), database)
-    return render_template("home.html", data=data, upcoming_events=upcoming_events, user=user)
+
+    return render_template("home.html", data=None, upcoming_events=[], user=user, jobapplications=[], current_page=1, total_pages=1)
 
 
 @app.route('/student/analyze_resume', methods=['GET'])
@@ -550,16 +615,17 @@ def analyze_resume():
     os.chdir("..")
     return render_template('resume_analyzer.html', data = output)
 
-@app.route("/student/display/", methods=['POST','GET'])
+@app.route("/student/display/", methods=['POST', 'GET'])
 def display():
-    path = os.getcwd()+"/Controller/resume/"
+    path = os.getcwd() + "/Controller/resume/"
     filename = os.listdir(path)
     if filename:
-        return send_file(path+str(filename[0]),as_attachment=True)
+        return send_file(path + str(filename[0]), as_attachment=True)
     else:
-        user = request.form['user_id']
-        user = find_user(str(user),database)
-        return render_template('home.html', user=user, data=data, upcoming_events=upcoming_events)
+        user_id = request.form['user_id']
+        user = find_user(str(user_id), database)
+        return render_template('home.html', data=None, upcoming_events=[], user=user, jobapplications=[], current_page=1, total_pages=1)
+
 
 
 
@@ -604,8 +670,110 @@ def chat_gpt_analyzer():
 
 @app.route('/student/job_search')
 def job_search():
-    return render_template('job_search.html')
+    keyword = request.args.get('keyword', 'Jobs')
+    job_title = request.args.get('job_title', '')
+    country = request.args.get('location', '')
+    employer = request.args.get('employer', '')
+    employment_type = request.args.get('employment_type', '')
+    page = request.args.get('page', 1, type=int)
+    prev_page = None
+    next_page = None
 
+    search_query = f"{keyword} {job_title} {country} {employer}".strip()
+
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": "jsearch.p.rapidapi.com"
+    }
+
+    job_listings_url = "https://jsearch.p.rapidapi.com/search"
+    querystring_jobs = {
+        "query": search_query,
+        "page": page,
+        "num_pages": "10",
+        "employment_types": employment_type,
+        "location": country,
+        "employers": employer,
+        "date_posted": "all"
+    }
+
+    print(f"Job Listings Query: {querystring_jobs}")
+
+    try:
+        response_jobs = requests.get(job_listings_url, headers=headers, params=querystring_jobs)
+        if response_jobs.status_code == 200:
+            jobs_data = response_jobs.json()
+            jobs = jobs_data.get("data", [])
+            total_jobs = len(jobs)
+            os.chdir(os.getcwd()+"/Controller/resume/")
+
+            for job in jobs:
+                job_description = job.get('job_description', '')
+                match_percentage = resume_analyzer(job_description, str(os.listdir(os.getcwd())[0]))
+                job['match_percentage'] = int(match_percentage)
+                if job['match_percentage'] > 85:
+                    job['match_class'] = 'high-match'
+                elif job['match_percentage'] > 70:
+                    job['match_class'] = 'medium-match'
+                else:
+                    job['match_class'] = 'low-match'
+            os.chdir("..")
+            os.chdir("..")
+            total_pages = (total_jobs // 10) + (1 if total_jobs % 10 > 0 else 0)
+            prev_page = page - 1 if page > 1 else None
+            next_page = page + 1 if page < total_pages else None
+
+        else:
+            jobs = []
+            total_pages = 1
+            print(f"Error: {response_jobs.status_code} - {response_jobs.text}")
+    except requests.RequestException as e:
+        logging.error(f"Error fetching job listings: {e}")
+        jobs = []
+
+    return render_template(
+        'job_search.html',
+        keyword=keyword,
+        selected_job_title=job_title,
+        selected_location=country,
+        selected_employer=employer,
+        selected_employment_type=employment_type,
+        jobs=jobs,
+        page=page,
+        total_pages=total_pages,
+        prev_page=prev_page,
+        next_page=next_page
+    )
+
+@app.route('/student/job_details/<job_id>', methods=['GET'])
+def job_details(job_id):
+    url = "https://jsearch.p.rapidapi.com/job-details"
+    querystring = {"job_id": job_id, "extended_publisher_details": "false"}
+
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": "jsearch.p.rapidapi.com"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=querystring)
+        if response.status_code == 200:
+            job_detail = response.json()
+            job_data = job_detail['data'][0]
+            job_description = job_data.get('job_description', '')
+            formatted_description = format_job_description(job_description)
+
+            job_data['formatted_description'] = formatted_description
+
+            return jsonify(job_data)
+        else:
+            return jsonify({"error": "Failed to fetch job details."}), 500
+    except requests.RequestException as e:
+        logging.error(f"Error fetching job details: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+
+#Deprecated
 @app.route('/student/job_search/result', methods=['POST'])
 def search():
     job_role = request.form['job_role']
@@ -748,8 +916,204 @@ def download_resume():
     else:
         return jsonify({"message": "Resume not found"}), 404
 
+@app.route('/interview-prep')
+def interview_prep():
+    return render_template('interview_prep.html')  # Assuming the HTML file is saved as interview_prep.html
+
+@app.route('/mock-interview')
+def mock_interview():
+    # Route for mock interviews
+    return render_template('mock_interview.html')
+
+@app.route('/common-questions')
+def common_questions():
+    # Route for common interview questions
+    return render_template('common_questions.html')
+
+@app.route('/interview-tips')
+def interview_tips():
+    # Route for interview tips
+    return render_template('interview_tips.html')
+
+@app.route('/company-insights')
+def company_insights():
+    # Route for company insights
+    return render_template('company_insights.html')
+
+@app.route('/practice-zone')
+def practice_zone():
+    # Route for interactive practice zone
+    return render_template('practice_zone.html')
+@app.errorhandler(BadRequest)
+def handle_bad_request(error):
+    print(f"Bad Request: {error}")  # Debug print
+    response = {
+        'error': 'Bad Request',
+        'message': str(error)
+    }
+    return jsonify(response), 400
+
+# Route to handle chatbot interaction
+@app.route('/chatbot', methods=['POST'])
+def chatbot():
+    try:
+        # Check if the 'message' field exists in form data
+        data = request.get_json()
+
+        # Debugging: Log the raw data to see what is being received
+        print("Received data:", data)
+        if data is None:
+            raise BadRequest("No JSON data received")
+
+        # Check if the 'message' field is present in the data
+        user_message = data.get('message', '')
+        if not user_message:
+            raise BadRequest("'message' field is required in the request")
+
+
+        print(f"Received user message: {user_message}")  # Debug print
+
+        # Set headers for OpenAI API request
+        headers = {
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+
+        # Payload to send to OpenAI API
+        payload = {
+            "model": "gpt-3.5-turbo",  # You can replace this with the model you prefer
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": user_message}
+            ],
+            "max_tokens": 150
+        }
+
+        # Send POST request to OpenAI API
+        response = requests.post(API_URL, json=payload, headers=headers)
+        print(f"OpenAI API Response Code: {response.status_code}")  # Debug print
+
+        # Check if the response was successful
+        if response.status_code == 200:
+            data = response.json()
+            bot_reply = data['choices'][0]['message']['content'].strip()
+            print(f"Bot reply: {bot_reply}")  # Debug print
+            return jsonify({'reply': bot_reply})
+
+        # If response status is not 200, return a generic error
+        else:
+            print(f"OpenAI API Error: {response.text}")  # Debug print
+            return jsonify({'reply': 'Sorry, I couldn\'t process your message.'}), 500
+
+    except BadRequest as e:
+        # Handle BadRequest (400)
+        return handle_bad_request(e)
+
+    except Exception as e:
+        # Catch any unexpected errors
+        print(f"Unexpected error: {str(e)}")  # Debug print
+        return jsonify({'error': 'Internal Server Error', 'message': str(e)}), 500
+
+
+@app.route('/mock-practice')
+def mock_practice():
+    return render_template('mock_interview.html')
+
+@app.route('/common-questions')
+def common_question():
+    return render_template('common_questions.html')
+
+
+@app.route('/generate-latex', methods=['POST'])
+def generate_latex():
+        form_data = request.get_json()
+        # resume_name = form_data['resume_name']
+        full_name = form_data['name']
+        email = form_data['email']
+        mobile = form_data['mobile']
+        linkedin = form_data['linkedin']
+        education = form_data['education']
+        experience = form_data['experience']
+        skills = form_data['skills']
+
+        latex_template = f"""
+            \\documentclass[a4paper,10pt]{{article}}
+            \\usepackage{{setspace}}  % For line spacing
+            \\usepackage{{hyperref}}  % For clickable links
+            \\usepackage{{geometry}}  % For page layout adjustments
+            \\geometry{{margin=1in}}
+            \\usepackage{{lmodern}}  % Standard modern font
+            \\usepackage{{enumitem}}  % For list customization
+            \\setstretch{{1.2}}  % Set line spacing
+        
+            \\begin{{document}}
+        
+            \\begin{{flushright}}
+            \\textbf{{(+00) 111-2222-3333}} \\\\ % Phone number
+            \\textbf{{{email}}} \\\\ % Email
+            \\textbf{{\\href{{{linkedin}}}}}{{linkedin.com/in/prachinavale/}}}} \\\\
+            \\end{{flushright}}
+        
+            \\begin{{flushleft}}  
+            {{\\fontsize{{24pt}}{{28pt}}\\selectfont \\textbf{{{full_name}}}}} \\\\
+            \\noindent\\rule{{\\textwidth}}{{0.4pt}}
+            \\end{{flushleft}}
+        
+            \\section*{{Contact Information}}
+            \\textbf{{Email:}} {email} \\\\
+            \\textbf{{Phone:}} {mobile} \\\\
+            \\textbf{{LinkedIn:}} \\href{{{linkedin}}}{{linkedin.com/in/prachinavale/}}
+        
+            \\section*{{Education}}
+            """
+
+        for edu in education:
+            latex_template += f"""
+                \\textbf{{{edu['degree']}}} \\\\
+                {edu['institution']} \\\\
+                Expected Graduation: {edu['graduationYear']} \\\\
+                GPA: {edu['gpa']} \\\\
+                Relevant Coursework: {edu['coursework']}
+                \\vspace{{10pt}}
+                """
+
+        latex_template += "\\section*{Experience}\n"
+
+        for exp in experience:
+            latex_template += f"""
+                \\textbf{{{exp['title']}}} \\\\
+                \\textit{{{exp['company']}, {exp['dates']}}} \\\\
+                \\begin{{itemize}}[leftmargin=*]
+                \\item {exp['achievements']}
+                \\end{{itemize}}
+                \\vspace{{10pt}}
+                """
+
+        latex_template += f"""
+            \\section*{{Skills}}
+            \\textbf{{Languages:}} {skills}
+            \\end{{document}}
+            """
+        # Encode LaTeX to Base64
+        base64_latex = base64.b64encode(latex_template.encode('utf-8')).decode('utf-8')
+        overleaf_url = f"https://www.overleaf.com/docs?snip_uri=data:application/x-tex;base64,{base64_latex}"
+
+        return jsonify({
+            'success': True,
+            'overleafUrl': overleaf_url
+        })
+
 if __name__ == '__main__':
+    import os
+
     with app.app_context():
         db.create_all()
+
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ['true', '1', 't']
-    app.run(debug=debug_mode)
+
+    # Path to SSL certificate and key for HTTPS
+    ssl_context = ('cert.pem', 'cert.key')  # Always define this explicitly
+
+    app.run(debug=debug_mode, ssl_context=ssl_context)
+
+
